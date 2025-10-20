@@ -161,11 +161,12 @@ int16_t drawDotString(int16_t x, int16_t y, const char* str, uint16_t color) {
 }
 
 // Feature flags
-const bool ENABLE_THREE_COLOR_MODE = false;  // false = green label + red value, true = value color based on range
+bool ENABLE_THREE_COLOR_MODE = false;  // false = green label + red value, true = value color based on range
 
 // Timing configuration
 const uint32_t BLINK_INTERVAL_MS = 500;     // Blink toggle interval
 const uint32_t DISPLAY_ON_TIME_MS = 10000;  // Display stays on for 10 seconds
+const uint32_t LONG_PRESS_DURATION_MS = 3000;  // 3 seconds for long press
 
 // Beep pattern settings
 const uint8_t RAPID_BEEP_COUNT = 20;   // Number of rapid beeps
@@ -180,6 +181,11 @@ uint32_t displayOnTime = 0;
 bool showValue = true;
 bool displayActive = false;
 bool readingInProgress = false;
+
+// Long-press detection for color mode switch
+uint32_t buttonPressStartTime = 0;
+bool buttonHeldDown = false;
+bool longPressTriggered = false;
 
 // Display text configuration - SINGLE SOURCE OF TRUTH
 const char LABEL_TEXT[] = "GRAVY BLOOD LVL:";      // Static label text (green)
@@ -400,6 +406,41 @@ void displayOff() {
   displayActive = false;
 }
 
+// Display mode switch message
+void displayModeMessage(const char* message) {
+  digitalWrite(TFT_BL, HIGH);
+  tft.fillScreen(COLOR_BLACK);
+  
+  // Center the message on screen
+  // Each character is CHAR_WIDTH pixels wide
+  int16_t messageLen = strlen(message);
+  int16_t messageWidth = messageLen * CHAR_WIDTH;
+  int16_t centerX = (PANEL_H - messageWidth) / 2;  // PANEL_H = 320 (width in landscape)
+  int16_t centerY = (PANEL_W / 2) - 10;  // PANEL_W = 170 (height in landscape), center vertically
+  
+  // Draw message in green
+  drawDotString(centerX, centerY, message, COLOR_GREEN);
+  
+  // Show for 2 seconds
+  delay(2000);
+}
+
+// Toggle color mode
+void toggleColorMode() {
+  ENABLE_THREE_COLOR_MODE = !ENABLE_THREE_COLOR_MODE;
+  
+  if (ENABLE_THREE_COLOR_MODE) {
+    Serial.println("Switched to THREE COLOR mode");
+    displayModeMessage("THREE COLOR");
+  } else {
+    Serial.println("Switched to SCREEN ACCURATE mode");
+    displayModeMessage("SCREEN ACCURATE");
+  }
+  
+  // Turn off display after showing message
+  displayOff();
+}
+
 void setup() {
   // Initialize serial for debugging
   Serial.begin(115200);
@@ -486,33 +527,52 @@ void loop() {
   if ((now - lastDebounceTime) > debounceDelay) {
     // Button is stable - check for press event
     if (buttonReading == LOW && !buttonPressed) {
-      // Button is pressed and we haven't processed this press yet
+      // Button pressed DOWN
       buttonPressed = true;
-      Serial.println("*** BUTTON PRESSED DETECTED ***");
-
-      if (!readingInProgress) {
+      buttonHeldDown = true;
+      buttonPressStartTime = now;
+      longPressTriggered = false;
+      Serial.println("*** BUTTON PRESSED ***");
+      
+    } else if (buttonReading == HIGH && buttonPressed) {
+      // Button released UP
+      uint32_t pressDuration = now - buttonPressStartTime;
+      buttonPressed = false;
+      buttonHeldDown = false;
+      Serial.print("Button released after ");
+      Serial.print(pressDuration);
+      Serial.println("ms");
+      
+      // Process short press if it wasn't a long press
+      if (!longPressTriggered && pressDuration < LONG_PRESS_DURATION_MS && !readingInProgress) {
+        Serial.println("Short press - triggering reading");
+        
         if (displayActive) {
           // Display is on - take new reading and reset timeout
           Serial.println("Display active - acquiring new reading");
           updateRandomValue();
-          // Clear screen for progressive drawing
           tft.fillScreen(COLOR_BLACK);
-          playAcquisitionBeeps();  // This will draw label progressively, then show value on final beep
+          playAcquisitionBeeps();
           displayOnTime = millis();
         } else {
           // Display is off - turn on, show label, beep, then show value
           Serial.println("Display off - generating new value and turning on");
-          updateRandomValue();     // Generate new value instantly
-          displayOn();             // Turn on display (clears screen)
-          playAcquisitionBeeps();  // Draw label progressively, then show value on final beep
+          updateRandomValue();
+          displayOn();
+          playAcquisitionBeeps();
         }
-      } else {
-        Serial.println("Reading in progress - ignoring button");
       }
-    } else if (buttonReading == HIGH) {
-      // Button released - reset flag for next press
-      buttonPressed = false;
     }
+  }
+  
+  // Check for long press (3 seconds) while button is held
+  if (buttonHeldDown && !longPressTriggered && (now - buttonPressStartTime) >= LONG_PRESS_DURATION_MS) {
+    Serial.println("!!! LONG PRESS DETECTED - SWITCHING COLOR MODE !!!");
+    longPressTriggered = true;
+    toggleColorMode();
+    buttonPressed = false;
+    buttonHeldDown = false;
+    return;
   }
 
   // Small delay to prevent excessive CPU usage
