@@ -3,10 +3,10 @@
  * For Seeed Studio XIAO ESP32-C6 + Waveshare 1.9" LCD
  * 
  * Features:
- * - Dot matrix display showing "GRAVYBLOOD LVL: XX%"
+ * - Dot matrix display showing "GRAVY BLOOD LVL:XX%"
  * - Green static label, red blinking percentage
  * - Button-activated reading
- * - Piezoelectric beeper (3 beeps on reading acquisition)
+ * - Piezoelectric beeper (rapid beeps on reading acquisition)
  * - Green and red indicator boxes at bottom
  * - Display turns off after 10 seconds (device stays awake)
  * 
@@ -68,7 +68,7 @@ const uint8_t GLYPH_DATA[][5] PROGMEM = {
   { 0x01, 0x71, 0x09, 0x05, 0x03 },
   { 0x36, 0x49, 0x49, 0x49, 0x36 },
   { 0x06, 0x49, 0x49, 0x29, 0x1E },
-  { 0x00, 0x36, 0x36, 0x00, 0x00 },
+  { 0x00, 0x00, 0x24, 0x00, 0x00 },
   { 0x62, 0x64, 0x08, 0x13, 0x23 },
   { 0x7E, 0x11, 0x11, 0x11, 0x7E },
   { 0x7F, 0x49, 0x49, 0x49, 0x36 },
@@ -99,12 +99,12 @@ const uint8_t GLYPH_DATA[][5] PROGMEM = {
 };
 
 // Layout configuration (must be defined before functions that use them)
-const int16_t BASE_X = 6;                    // Starting X position for text
+const int16_t BASE_X = 2;                    // Starting X position for text
 const int16_t BASE_Y = 67;                   // Starting Y position for text
 const uint8_t DOT_R = 1;                     // Dot radius in pixels
 const uint8_t PITCH = 3;                     // Spacing between dots
-const uint8_t GAP = 2;                       // Gap between characters
-const uint8_t CHAR_WIDTH = 5 * PITCH + GAP;  // Precomputed character width (17 pixels)
+const uint8_t GAP = 1;                       // Gap between characters
+const uint8_t CHAR_WIDTH = 5 * PITCH + GAP;  // Precomputed character width (16 pixels)
 
 // Fast glyph lookup - converts character to font array index
 int8_t glyphIndex(char c) {
@@ -181,9 +181,14 @@ bool showValue = true;
 bool displayActive = false;
 bool readingInProgress = false;
 
-// Display text and positioning
+// Display text configuration - SINGLE SOURCE OF TRUTH
+const char LABEL_TEXT[] = "GRAVY BLOOD LVL:";      // Static label text (green)
 char valueText[5] = "89%";                          // Mutable value string (format: "XX%")
 int currentValue = 89;                              // Current numeric value (10-99)
+
+// Calculated positioning variables (computed at runtime)
+int16_t labelLen = 0;                               // Length of label string
+int16_t valueLen = 0;                               // Length of value string
 int16_t valueX = 0;                                 // X position of value text
 const int16_t valueY = BASE_Y;                      // Y position (same as label)
 int16_t valueWidth = 0;                             // Width of value area for clearing
@@ -194,6 +199,25 @@ int16_t greenBoxX = 0;
 int16_t redBoxX = 0;
 const int16_t BOX_SIZE = 23;
 const int16_t BOX_Y = PANEL_W - BOX_SIZE;  // Bottom of display (landscape mode)
+
+// Calculate all text positions based on label length (call this once at startup)
+void calculateTextPositions() {
+  labelLen = strlen(LABEL_TEXT);
+  valueLen = strlen(valueText);
+  
+  // Value starts immediately after the label
+  valueX = BASE_X + (labelLen * CHAR_WIDTH);
+  
+  // Width needed to clear the value area
+  valueWidth = valueLen * CHAR_WIDTH;
+  
+  // Green box below "LVL" - find the 'L' position (3rd char from end: "LVL:")
+  int lPosition = labelLen - 4;  // Position of first 'L' in "LVL:"
+  greenBoxX = BASE_X + lPosition * CHAR_WIDTH;
+  
+  // Red box below the value
+  redBoxX = valueX;
+}
 
 // Get color based on value range
 uint16_t getValueColor(int value) {
@@ -234,22 +258,7 @@ void drawLabel() {
   tft.fillScreen(COLOR_BLACK);
 
   // Draw green label text
-  const char* label = "GRAVYBLOOD LVL:";
-  int16_t labelWidth = drawDotString(BASE_X, BASE_Y, label, COLOR_GREEN);
-
-  // Calculate value position (10 pixels after label)
-  valueX = BASE_X + labelWidth + 10;
-
-  // Calculate value clearing dimensions (precompute for performance)
-  int16_t charCount = strlen(valueText);
-  valueWidth = charCount * CHAR_WIDTH + DOT_R * 2;
-
-  // Calculate indicator box positions
-  // Green box below the "L" in "LVL:" (character index 13)
-  greenBoxX = BASE_X + 13 * CHAR_WIDTH;
-
-  // Red box below first character of percentage value
-  redBoxX = valueX;
+  drawDotString(BASE_X, BASE_Y, LABEL_TEXT, COLOR_GREEN);
 
   // Draw only green box initially (red box appears with value)
   drawGreenBox();
@@ -257,23 +266,12 @@ void drawLabel() {
 
 // Draw label progressively, one character at a time
 void drawLabelProgressive(int charCount) {
-  const char* label = "GRAVYBLOOD LVL:";
-  int labelLen = strlen(label);
   static int lastCharCount = 0;  // Track how many chars were drawn last time
 
   // Clear screen and show green box on first character
   if (charCount == 1) {
     tft.fillScreen(COLOR_BLACK);
     lastCharCount = 0;
-
-    // Calculate positions for boxes
-    greenBoxX = BASE_X + 13 * CHAR_WIDTH;
-    int16_t labelWidth = labelLen * CHAR_WIDTH;
-    valueX = BASE_X + labelWidth + 10;
-    redBoxX = valueX;
-
-    int16_t valueCharCount = strlen(valueText);
-    valueWidth = valueCharCount * CHAR_WIDTH + DOT_R * 2;
 
     // Show green box at the start
     drawGreenBox();
@@ -283,7 +281,7 @@ void drawLabelProgressive(int charCount) {
   if (charCount <= labelLen && charCount > lastCharCount) {
     for (int i = lastCharCount; i < charCount; i++) {
       int16_t x = BASE_X + i * CHAR_WIDTH;
-      drawDotChar(x, BASE_Y, label[i], COLOR_GREEN);
+      drawDotChar(x, BASE_Y, LABEL_TEXT[i], COLOR_GREEN);
     }
     lastCharCount = charCount;
   }
@@ -291,8 +289,11 @@ void drawLabelProgressive(int charCount) {
 
 // Draw or clear the blinking value text
 void drawValue(bool visible) {
-  // Clear the value area
-  tft.fillRect(valueX - DOT_R, valueY - DOT_R, valueWidth, valueHeight, COLOR_BLACK);
+  // Clear the value area with extra margin to eliminate any stray pixels
+  // Start clearing 4 pixels before valueX to catch any anti-aliasing or overlap
+  int16_t clearX = valueX - 4;
+  int16_t clearWidth = valueWidth + 8;  // Extra margin on both sides
+  tft.fillRect(clearX, valueY - DOT_R - 1, clearWidth, valueHeight + 2, COLOR_BLACK);
 
   // Draw text with color based on value if visible
   if (visible) {
@@ -305,20 +306,22 @@ void drawValue(bool visible) {
 void updateRandomValue() {
   currentValue = random(10, 100);
   snprintf(valueText, sizeof(valueText), "%d%%", currentValue);
+  
+  // Recalculate value width in case length changed (e.g., "9%" vs "99%")
+  valueLen = strlen(valueText);
+  valueWidth = valueLen * CHAR_WIDTH;
 }
 
 // Play rapid beeps followed by one longer tone, drawing value on final beep
 void playAcquisitionBeeps() {
-  const char* label = "GRAVYBLOOD LVL:";
-  int labelLen = strlen(label);
   int halfBeeps = RAPID_BEEP_COUNT / 2;  // Complete text sweep in first half of beeps
 
   // Draw label progressively during rapid beeps
   for (int i = 0; i < RAPID_BEEP_COUNT; i++) {
-    // Calculate how many characters to show (complete in first 5 beeps)
+    // Calculate how many characters to show (complete in first half)
     int charsToShow;
     if (i < halfBeeps) {
-      // First half: spread all 15 chars across 5 beeps (3 chars per beep)
+      // First half: spread all characters across half the beeps
       charsToShow = ((i + 1) * labelLen) / halfBeeps;
     } else {
       // Second half: all characters already shown
@@ -429,6 +432,9 @@ void setup() {
   tft.init(PANEL_W, PANEL_H, SPI_MODE0);
   tft.setSPISpeed(40000000);  // 40 MHz - ESP32-C6 can handle high SPI speeds
   tft.setRotation(1);         // Landscape orientation (320x170)
+
+  // Calculate text positions based on label string
+  calculateTextPositions();
 
   // Initial boot - display on and acquire reading with beeps
   updateRandomValue();     // Generate initial value
