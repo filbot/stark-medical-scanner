@@ -211,12 +211,12 @@ void calculateTextPositions() {
   // Width needed to clear the value area
   valueWidth = valueLen * CHAR_WIDTH;
   
-  // Green box below "LVL" - find the 'L' position (3rd char from end: "LVL:")
-  int lPosition = labelLen - 4;  // Position of first 'L' in "LVL:"
-  greenBoxX = BASE_X + lPosition * CHAR_WIDTH;
+  // Position boxes at bottom-right corner of display
+  // Red box aligned to bottom-right corner
+  redBoxX = PANEL_H - BOX_SIZE;  // 320 - 23 = 297
   
-  // Red box below the value
-  redBoxX = valueX;
+  // Green box to the left of red box with small gap
+  greenBoxX = redBoxX - BOX_SIZE - 3;  // 3 pixel gap between boxes
 }
 
 // Get color based on value range
@@ -431,7 +431,7 @@ void setup() {
   // Initialize display with optimized SPI speed for ESP32-C6
   tft.init(PANEL_W, PANEL_H, SPI_MODE0);
   tft.setSPISpeed(40000000);  // 40 MHz - ESP32-C6 can handle high SPI speeds
-  tft.setRotation(1);         // Landscape orientation (320x170)
+  tft.setRotation(3);         // Landscape orientation rotated 180 degrees (320x170)
 
   // Calculate text positions based on label string
   calculateTextPositions();
