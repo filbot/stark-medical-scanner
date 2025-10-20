@@ -493,16 +493,11 @@ void loop() {
       lastBlink = now;
       showValue = !showValue;
       drawValue(showValue);
-    }
-
-    // Check if display timeout reached - only turn off when value is not visible
-    if (now - displayOnTime >= DISPLAY_ON_TIME_MS) {
-      if (!showValue) {
-        // Value is already off, turn off display immediately
+      
+      // Check if we should turn off display after this blink
+      // Only turn off when timeout is reached AND value just blinked off
+      if (!showValue && (now - displayOnTime >= DISPLAY_ON_TIME_MS)) {
         displayOff();
-      } else {
-        // Value is visible, wait for next blink cycle to turn it off
-        // Don't do anything - let the blink cycle complete
       }
     }
   }
