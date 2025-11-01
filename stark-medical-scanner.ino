@@ -100,11 +100,15 @@ const uint8_t GLYPH_DATA[][5] PROGMEM = {
 
 // Layout configuration (must be defined before functions that use them)
 const int16_t BASE_X = 2;                    // Starting X position for text
-const int16_t BASE_Y = 67;                   // Starting Y position for text
 const uint8_t DOT_R = 1;                     // Dot radius in pixels
 const uint8_t PITCH = 3;                     // Spacing between dots
 const uint8_t GAP = 1;                       // Gap between characters
 const uint8_t CHAR_WIDTH = 5 * PITCH + GAP;  // Precomputed character width (16 pixels)
+
+// Position adjustment offsets - ADJUST THESE VALUES TO MOVE ELEMENTS
+const int16_t TEXT_Y_OFFSET = 68;            // Vertical position for text (0 = top of display, positive = down)
+const int16_t GREEN_BOX_X_OFFSET = -10;     // Horizontal offset for green box (negative = left, positive = right)
+const int16_t RED_BOX_X_OFFSET = 0;          // Horizontal offset for red box (negative = left, positive = right)
 
 // Fast glyph lookup - converts character to font array index
 int8_t glyphIndex(char c) {
@@ -196,7 +200,7 @@ int currentValue = 89;                              // Current numeric value (10
 int16_t labelLen = 0;                               // Length of label string
 int16_t valueLen = 0;                               // Length of value string
 int16_t valueX = 0;                                 // X position of value text
-const int16_t valueY = BASE_Y;                      // Y position (same as label)
+int16_t valueY = 0;                                 // Y position (computed with offset)
 int16_t valueWidth = 0;                             // Width of value area for clearing
 const int16_t valueHeight = 7 * PITCH + DOT_R * 2;  // Height (constant)
 
@@ -211,18 +215,21 @@ void calculateTextPositions() {
   labelLen = strlen(LABEL_TEXT);
   valueLen = strlen(valueText);
   
+  // Use TEXT_Y_OFFSET directly as the Y position (0 = top of display)
+  valueY = TEXT_Y_OFFSET;
+  
   // Value starts immediately after the label
   valueX = BASE_X + (labelLen * CHAR_WIDTH);
   
   // Width needed to clear the value area
   valueWidth = valueLen * CHAR_WIDTH;
   
-  // Position boxes at bottom-right corner of display
-  // Red box aligned to bottom-right corner
-  redBoxX = PANEL_H - BOX_SIZE;  // 320 - 23 = 297
+  // Position boxes at bottom-right corner of display with offsets
+  // Red box aligned to bottom-right corner + offset
+  redBoxX = PANEL_H - BOX_SIZE + RED_BOX_X_OFFSET;
   
-  // Green box to the left of red box with small gap
-  greenBoxX = redBoxX - BOX_SIZE - 3;  // 3 pixel gap between boxes
+  // Green box to the left of red box with gap + offset
+  greenBoxX = redBoxX - BOX_SIZE - 3 + GREEN_BOX_X_OFFSET;
 }
 
 // Get color based on value range
@@ -264,7 +271,7 @@ void drawLabel() {
   tft.fillScreen(COLOR_BLACK);
 
   // Draw green label text
-  drawDotString(BASE_X, BASE_Y, LABEL_TEXT, COLOR_GREEN);
+  drawDotString(BASE_X, valueY, LABEL_TEXT, COLOR_GREEN);
 
   // Draw only green box initially (red box appears with value)
   drawGreenBox();
@@ -287,7 +294,7 @@ void drawLabelProgressive(int charCount) {
   if (charCount <= labelLen && charCount > lastCharCount) {
     for (int i = lastCharCount; i < charCount; i++) {
       int16_t x = BASE_X + i * CHAR_WIDTH;
-      drawDotChar(x, BASE_Y, LABEL_TEXT[i], COLOR_GREEN);
+      drawDotChar(x, valueY, LABEL_TEXT[i], COLOR_GREEN);
     }
     lastCharCount = charCount;
   }
