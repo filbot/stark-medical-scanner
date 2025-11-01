@@ -28,6 +28,16 @@
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include "xiao_esp32c6_pins.h"
+#include <esp_sleep.h>
+#include <driver/gpio.h>
+#include <driver/rtc_io.h>
+#if defined(ARDUINO_USB_MODE) || defined(ARDUINO_USB_CDC_ON_BOOT)
+#include <HWCDC.h>
+#endif
+#if defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 1) && defined(CONFIG_TINYUSB_ENABLED)
+#include "esp32-hal-tinyusb.h"
+#endif
 
 // Pin definitions - XIAO ESP32-C6 outer header pins only
 #define TFT_CS 0     // D0  = GPIO0  - Chip Select
@@ -38,8 +48,19 @@
 #define TFT_MOSI 18  // D10 = GPIO18 - MOSI (Hardware SPI)
 
 // User input/output pins
-#define BUTTON_PIN 22  // D4  = GPIO22 - Button with external 10kΩ pull-up
+#define BUTTON_PIN LP_GPIO4  // A4 header -> LP_GPIO4 (RTC-capable) - Button with external 10kΩ pull-up
 #define BUZZER_PIN 23  // D5  = GPIO23 - Piezo buzzer (OUTPUT)
+constexpr gpio_num_t BUTTON_WAKE_GPIO = GPIO_NUM_4;
+constexpr uint64_t BUTTON_WAKE_MASK = 1ULL << BUTTON_WAKE_GPIO;
+
+// Track boot count across deep sleeps (stored in RTC memory)
+RTC_DATA_ATTR uint32_t bootCount = 0;
+bool wokeFromDeepSleep = false;
+
+// Forward declarations for power management helpers
+static bool stayAwakeForUsb();
+static void enterDeepSleep();
+static void logWakeupReason();
 
 // Display object - using hardware SPI for optimal performance
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
@@ -165,6 +186,7 @@ int16_t drawDotString(int16_t x, int16_t y, const char* str, uint16_t color) {
 }
 
 // Feature flags
+RTC_DATA_ATTR bool storedThreeColorMode = false;  // Persisted across deep sleep
 bool ENABLE_THREE_COLOR_MODE = false;  // false = green label + red value, true = value color based on range
 
 // Timing configuration
@@ -384,6 +406,96 @@ void acquireReading() {
   readingInProgress = false;
 }
 
+// Log wakeup cause for diagnostics (mirrors Espressif example)
+static void logWakeupReason() {
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+  switch (cause) {
+    case ESP_SLEEP_WAKEUP_EXT0:
+      Serial.println("Wakeup cause: external RTC_IO (ext0)");
+      break;
+    case ESP_SLEEP_WAKEUP_EXT1:
+      Serial.println("Wakeup cause: external RTC_CNTL (ext1)");
+      break;
+    case ESP_SLEEP_WAKEUP_TIMER:
+      Serial.println("Wakeup cause: timer");
+      break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD:
+      Serial.println("Wakeup cause: touchpad");
+      break;
+    case ESP_SLEEP_WAKEUP_ULP:
+      Serial.println("Wakeup cause: ULP program");
+      break;
+    case ESP_SLEEP_WAKEUP_UNDEFINED:
+      Serial.println("Wakeup cause: fresh boot (not deep sleep)");
+      break;
+    default:
+      Serial.print("Wakeup cause: other (");
+      Serial.print(static_cast<int>(cause));
+      Serial.println(")");
+      break;
+  }
+}
+
+// Returns true when a USB host connection is active (Serial monitor/open CDC)
+static bool stayAwakeForUsb() {
+#if defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 1) && defined(CONFIG_TINYUSB_ENABLED)
+  return TinyUSBDevice.mounted();
+#elif defined(ARDUINO_USB_MODE) || defined(ARDUINO_USB_CDC_ON_BOOT)
+  return HWCDC::isConnected();
+#else
+  return false;
+#endif
+}
+
+// Prepare peripherals for deep sleep and enter low-power mode unless USB keeps us awake
+static void enterDeepSleep() {
+  static bool usbGuardAnnounced = false;
+  bool usbConnected = stayAwakeForUsb();
+
+  noTone(BUZZER_PIN);
+  pinMode(BUZZER_PIN, INPUT);  // High-impedance to stop any leakage
+
+  digitalWrite(TFT_BL, LOW);
+
+  // Keep the wake pin pulled up regardless so it is ready to wake us
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  delay(1);  // Allow GPIO configuration to settle
+
+  if (usbConnected) {
+    if (!usbGuardAnnounced) {
+      Serial.println("USB connected – skipping deep sleep for development.");
+      usbGuardAnnounced = true;
+    }
+    return;
+  }
+  usbGuardAnnounced = false;
+
+  int buttonLevel = digitalRead(BUTTON_PIN);
+  if (buttonLevel == LOW) {
+    Serial.println("Button is LOW at sleep request – deferring deep sleep to avoid instant wake.");
+    return;
+  }
+
+  // Ensure RTC domain keeps the button pulled up during deep sleep
+  rtc_gpio_pulldown_dis(BUTTON_WAKE_GPIO);
+  rtc_gpio_pullup_en(BUTTON_WAKE_GPIO);
+  rtc_gpio_hold_en(BUTTON_WAKE_GPIO);
+  gpio_hold_en(static_cast<gpio_num_t>(TFT_BL));
+
+  // Ensure SPI transactions are idle before shutting down
+  SPI.end();
+
+  Serial.println("Preparing peripherals for deep sleep...");
+
+  Serial.println("Entering deep sleep. Press the button to wake.");
+  Serial.flush();
+  esp_sleep_enable_ext1_wakeup(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ALL_LOW);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  delay(10);
+  esp_deep_sleep_start();
+}
+
 // Turn on display and backlight (clears screen, ready for progressive drawing)
 void displayOn() {
   digitalWrite(TFT_BL, HIGH);
@@ -406,11 +518,12 @@ void displayOnWithValue() {
   drawValue(true);
 }
 
-// Turn off display and backlight (device stays awake)
+// Turn off display and backlight, then enter deep sleep unless USB keeps us awake
 void displayOff() {
   digitalWrite(TFT_BL, LOW);
   tft.fillScreen(COLOR_BLACK);
   displayActive = false;
+  enterDeepSleep();
 }
 
 // Display mode switch message
@@ -435,6 +548,7 @@ void displayModeMessage(const char* message) {
 // Toggle color mode
 void toggleColorMode() {
   ENABLE_THREE_COLOR_MODE = !ENABLE_THREE_COLOR_MODE;
+  storedThreeColorMode = ENABLE_THREE_COLOR_MODE;
   
   if (ENABLE_THREE_COLOR_MODE) {
     Serial.println("Switched to THREE COLOR mode");
@@ -451,14 +565,32 @@ void toggleColorMode() {
 void setup() {
   // Initialize serial for debugging
   Serial.begin(115200);
-  delay(500);
+  bool usbConnected = stayAwakeForUsb();
+  delay(usbConnected ? 500 : 40);
   Serial.println("\n=== Blood Toxicity Monitor Starting ===");
+  bootCount++;
+  Serial.print("Boot count (RTC): ");
+  Serial.println(bootCount);
+  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  wokeFromDeepSleep = (wakeCause == ESP_SLEEP_WAKEUP_EXT1);
+  logWakeupReason();
+  if (usbConnected) {
+    Serial.println("USB connection detected – development guard active.");
+  }
 
   // Initialize ESP32-C6 hardware random number generator
   randomSeed(esp_random());
+  ENABLE_THREE_COLOR_MODE = storedThreeColorMode;
+  Serial.print("Three color mode restored: ");
+  Serial.println(ENABLE_THREE_COLOR_MODE ? "ENABLED" : "DISABLED");
 
   // Configure button pin with internal pull-up (backup for external pull-up)
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  rtc_gpio_hold_dis(BUTTON_WAKE_GPIO);
+  rtc_gpio_init(BUTTON_WAKE_GPIO);
+  rtc_gpio_set_direction(BUTTON_WAKE_GPIO, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pullup_en(BUTTON_WAKE_GPIO);
+  rtc_gpio_pulldown_dis(BUTTON_WAKE_GPIO);
   delay(10);  // Give pull-up time to stabilize
   Serial.print("Button pin (GPIO");
   Serial.print(BUTTON_PIN);
@@ -475,6 +607,7 @@ void setup() {
 
   // Configure backlight
   pinMode(TFT_BL, OUTPUT);
+  gpio_hold_dis(static_cast<gpio_num_t>(TFT_BL));
 
   // Initialize display with optimized SPI speed for ESP32-C6
   tft.init(PANEL_W, PANEL_H, SPI_MODE0);
@@ -580,4 +713,3 @@ void loop() {
   // Small delay to prevent excessive CPU usage
   delay(10);
 }
-
